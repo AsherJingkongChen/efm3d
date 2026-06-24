@@ -125,7 +125,9 @@ def download_wds_files_for_single_sequence(
         relative_path = os.path.join(sequence_name, tar_name)
         # Initialize the list for this sequence if not already done
         try:
-            response = http.get(tar_info["download_url"], stream=True)
+            response = http.get(
+                tar_info["download_url"], stream=True, timeout=(30, 60)
+            )
             response.raise_for_status()  # Raise an exception for bad status codes
             with open(filepath, "wb") as f:
                 for chunk in response.iter_content(1024):
@@ -156,6 +158,25 @@ def download_sequences(
         sequence_dir = os.path.join(output_folder_path, sequence_name)
         # Added exist_ok=True to avoid error if directory already exists
         os.makedirs(sequence_dir, exist_ok=True)
+        # Resume-skip: if every expected tar is already on disk with
+        # plausible size (>50 MB; ASE tar p10=72 MB, p50=87 MB, every
+        # observed partial < 12 MB, so 50 MB is in the safe gap), skip
+        # the network round-trip and reuse the existing files.
+        expected_tars = [
+            tn.replace("_tar", ".tar") for tn in sequence_info.keys()
+        ]
+        if expected_tars and all(
+            os.path.isfile(os.path.join(sequence_dir, t))
+            and os.path.getsize(os.path.join(sequence_dir, t)) > 50_000_000
+            for t in expected_tars
+        ):
+            logger.info(
+                f"Skipping {sequence_name}: {len(expected_tars)} tars already present"
+            )
+            success_sequences_with_tars[sequence_name] = [
+                os.path.join(sequence_name, t) for t in expected_tars
+            ]
+            continue
         successful_tar_list, failed_tar_list = download_wds_files_for_single_sequence(
             sequence_info, sequence_dir, sequence_name
         )
@@ -246,9 +267,11 @@ def main(
     assert os.path.exists(input_json_path), (
         f"Input JSON file {input_json_path} does not exist."
     )
-    assert os.path.exists(output_folder_path) is False, (
-        f"Output folder {output_folder_path} already exists. Please delete this folder and retry"
-    )
+    if os.path.exists(output_folder_path):
+        logger.warning(
+            f"Output folder {output_folder_path} already exists; "
+            f"continuing in resume mode (intact tars are skipped)"
+        )
 
     # extract tar urls
     with open(input_json_path, "r") as file:
