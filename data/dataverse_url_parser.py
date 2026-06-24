@@ -158,16 +158,29 @@ def download_sequences(
         sequence_dir = os.path.join(output_folder_path, sequence_name)
         # Added exist_ok=True to avoid error if directory already exists
         os.makedirs(sequence_dir, exist_ok=True)
-        # Resume-skip: if every expected tar is already on disk with
-        # plausible size (>50 MB; ASE tar p10=72 MB, p50=87 MB, every
-        # observed partial < 12 MB, so 50 MB is in the safe gap), skip
-        # the network round-trip and reuse the existing files.
+        # Resume-skip: only reuse a tar if it is on disk, larger than a
+        # plausible minimum, AND ends with the tar EOF marker (the spec
+        # requires two zero-filled 512-byte blocks at the tail). The
+        # combined check rejects truncated partials whose tail bytes
+        # happen to exceed the size floor; a random partial passing the
+        # tail-zero check has probability ~2^-8192.
+        def _tar_intact(p: str) -> bool:
+            if not os.path.isfile(p):
+                return False
+            if os.path.getsize(p) < 1_000_000:
+                return False
+            try:
+                with open(p, "rb") as f:
+                    f.seek(-1024, os.SEEK_END)
+                    return f.read(1024) == b"\x00" * 1024
+            except OSError:
+                return False
+
         expected_tars = [
             tn.replace("_tar", ".tar") for tn in sequence_info.keys()
         ]
         if expected_tars and all(
-            os.path.isfile(os.path.join(sequence_dir, t))
-            and os.path.getsize(os.path.join(sequence_dir, t)) > 50_000_000
+            _tar_intact(os.path.join(sequence_dir, t))
             for t in expected_tars
         ):
             logger.info(
